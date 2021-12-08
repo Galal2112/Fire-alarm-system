@@ -1,47 +1,86 @@
-#include <Arduino.h>
 #include <OneWire.h>
 #include <DallasTemperature.h>
 #include <ESP8266WiFi.h>
 #include <WiFiClientSecure.h>
 #include <UniversalTelegramBot.h>
-// Library for interacting with the Telegram API
-// Search for "Telegegram" in the Library manager and install
-// The universal Telegram library
-// https://github.com/witnessmenow/Universal-Arduino-Telegram-Bot
 
 
-#include <ArduinoJson.h>
-#include <iostream>
-#include <sstream>
-// Library used for parsing Json from the API responses
-// NOTE: There is a breaking change in the 6.x.x version,
-// install the 5.x.x version instead
-// Search for "Arduino Json" in the Arduino Library manager
-// https://github.com/bblanchon/ArduinoJson
+/**
+ * My Wifi access data and APIs
+ * **/
+char ssid[] = "network_SSID";
+char password[] = "network _assword";
 
-//------- Replace the following! ------
-
-char ssid[] = "Home";         // your network SSID (name)
-char password[] = "G87783F8946MYUL3"; // your network password
-
-#define TELEGRAM_BOT_TOKEN "1892711791:AAGU-inz6WXzT_SLhw7uiFuvUV_mMbA7p5w"
+#define TELEGRAM_BOT_TOKEN "SET_ME"
 
 // This is the Wifi client that supports HTTPS
-WiFiClientSecure client;
-UniversalTelegramBot bot(TELEGRAM_BOT_TOKEN, client);
+WiFiClientSecure telegramClient;
+UniversalTelegramBot bot(TELEGRAM_BOT_TOKEN, telegramClient);
 
+// Open Weather Map API
+WiFiClient weatherClient;
+String latitude = "52.5790";
+String longitude = "13.2805";
+String apiKey = "SET_ME";
+DynamicJsonDocument jsonDocument(2048);
 
-//#define ONE_WIRE_BUS D7
-
+// My Arduino pin
 OneWire oneWire(D7);
-
 DallasTemperature sensors(&oneWire);
 
 float Celsius = 0;
+float currentLocationTemp;
 String chat_id = "";
-float Fahrenheit = 0;
-int delayBetweenChecks = 1000;
+int delayBetweenChecks = 1000; //Telegram
 unsigned long lastTimeChecked;   //last time messages' scan has been done
+int delayBetweenWeatherChecks = 5 * 60 * 1000;
+unsigned long lastTimeCheckedWeather = 0;
+
+void getWeather() {
+    Serial.println("\nStarting connection to server...");
+    // if you get a connection, report back via serial:
+    if (weatherClient.connect("api.openweathermap.org", 80)) {
+        Serial.println("connected to server");
+        // Make a HTTP request:
+        String url = "";
+        url = url + String("/data/2.5/onecall?lat=") + String(latitude + "&lon=") + String(longitude) +
+              "&exclude=alerts,minutely,hourly,daily&appid=" + apiKey + String("&units=metric");
+
+        // Make a HTTP request
+        String http = "GET ";
+        http = http + url + " HTTP/1.1\r\n";
+        http = http + "Host: " + String("api.openweathermap.org") + "\r\n";
+        http = http + "Connection: close\r\n";
+        http = http + "Content-Type: application/json\r\n";
+        http = http + "\r\n";
+        weatherClient.print(http);
+        delay(500);
+    } else {
+        Serial.println("unable to connect");
+    }
+
+    String response = weatherClient.readStringUntil('\r');
+    Serial.println(response);
+
+    // Skip HTTP headers
+    char endOfHeaders[] = "\r\n\r\n";
+    if (!weatherClient.find(endOfHeaders)) {
+        Serial.println(F("Invalid response"));
+        return;
+    }
+
+    DeserializationError error = deserializeJson(jsonDocument, weatherClient);
+    if (error) {
+        Serial.println("parseObject() failed");
+        Serial.println(error.c_str());
+        return;
+    }
+    //get the data from the json tree
+    currentLocationTemp = jsonDocument["current"]["temp"];
+    Serial.println(currentLocationTemp);
+    // Disconnect from the server
+    weatherClient.stop();
+}
 
 void setup() {
     sensors.begin();
@@ -67,79 +106,75 @@ void setup() {
     Serial.print("IP address: ");
     Serial.println(WiFi.localIP());
 
-    // Only required on 2.5 Beta
-    client.setInsecure();
+    telegramClient.setInsecure();
 
+    getWeather();
 
-    // longPoll keeps the request to Telegram open for the given amount of seconds if there are no messages
-    // This hugely improves response time of the bot, but is only really suitable for projects
-    // where the the initial interaction comes from Telegram as the requests will block the loop for
-    // the length of the long poll
-    bot.longPoll = 60;
+    bot.longPoll = 20;
 }
-
 void handleNewMessages(int numNewMessages) {
 
     for (int i = 0; i < numNewMessages; i++) {
+        if (bot.messages[i].chat_id.equals("1610750027")) {
+            // If the type is a "callback_query", a inline keyboard button was pressed
+            if (bot.messages[i].type == F("callback_query")) {
+                String text = bot.messages[i].text;
+                Serial.print("Call back button pressed with text: ");
+                Serial.println(text);
 
-        // If the type is a "callback_query", a inline keyboard button was pressed
-        if (bot.messages[i].type ==  F("callback_query")) {
-            String text = bot.messages[i].text;
-            Serial.print("Call back button pressed with text: ");
-            Serial.println(text);
+                if (text == F("WEATHER")) {
+                    getWeather();
+                    String message = String("Weather temperature is ") + currentLocationTemp + "°C\n";
+                    bot.sendMessage(chat_id, message, "Markdown");
+                } else if (text == F("HOME_TEMPERATURE")) {
+                    Celsius = sensors.getTempCByIndex(0);
+                    String message = String("Current temperature is ") + Celsius + "°C\n";
+                    bot.sendMessage(chat_id, message, "Markdown");
 
-            if (text == F("WEATHER")) {
-                //Send weather
-            } else if (text == F("HOME_TEMPERATURE")) {
-                std::ostringstream message;
-                message << "Current temperature is " << Celsius << "\n" << Celsius;
-                std::string var = message.str();
-                bot.sendMessage(chat_id, reinterpret_cast<String &&>(message), "Markdown");
+                }
+            } else {
+                chat_id = String(bot.messages[i].chat_id);
+                String text = bot.messages[i].text;
 
+                if (text == F("/options")) {
+                    String keyboardJson = F(
+                            "[[{ \"text\" : \"Weather\", \"callback_data\" : \"WEATHER\" },{ \"text\" : \"Home Temperature\", \"callback_data\" : \"HOME_TEMPERATURE\" }]]");
+                    bot.sendMessageWithInlineKeyboard(chat_id, "Your Home Temperature Alarm", "", keyboardJson);
+                }
+
+                // When a user first uses a bot they will send a "/start" command
+                // So this is a good place to let the users know what commands are available
+                if (text == F("/start")) {
+
+                    bot.sendMessage(chat_id, "/options : returns the available commands\n", "Markdown");
+                }
             }
         } else {
-            chat_id = String(bot.messages[i].chat_id);
-            String text = bot.messages[i].text;
-
-            if (text == F("/options")) {
-
-                // Keyboard Json is an array of arrays.
-                // The size of the main array is how many row options the keyboard has
-                // The size of the sub arrays is how many coloums that row has
-
-                // "The Text" property is what shows up in the keyboard
-                // The "callback_data" property is the text that gets sent when pressed
-
-                String keyboardJson = F("[[{ \"text\" : \"Weather\", \"callback_data\" : \"WEATHER\" },{ \"text\" : \"Home Temperature\", \"callback_data\" : \"HOME_TEMPERATURE\" }]]");
-                bot.sendMessageWithInlineKeyboard(chat_id, "Your ", "", keyboardJson);
-            }
-
-            // When a user first uses a bot they will send a "/start" command
-            // So this is a good place to let the users know what commands are available
-            if (text == F("/start")) {
-
-                bot.sendMessage(chat_id, "/options : returns the inline keyboard\n", "Markdown");
-            }
+            bot.sendMessage(bot.messages[i].chat_id, "Unauthorized\n", "Markdown");
         }
     }
 }
 
 void loop() {
     sensors.requestTemperatures();
-
     Celsius = sensors.getTempCByIndex(0);
-    Fahrenheit = sensors.toFahrenheit(Celsius);
-
     Serial.print(Celsius);
-    Serial.print(" C  ");
-    Serial.print(Fahrenheit);
-    Serial.println(" F");
+    Serial.println(" C  ");
 
-    if (millis() > lastTimeChecked + delayBetweenChecks)  {
+    if (millis() > lastTimeCheckedWeather + delayBetweenWeatherChecks) {
+        getWeather();
+        lastTimeCheckedWeather = millis();
+    }
+
+    if (Celsius > (currentLocationTemp + 15)) {
+        String message = "🔥🔥🔥Fire🔥🔥🔥";
+        bot.sendMessage(chat_id, message, "Markdown");
+    }
+
+    if (millis() > lastTimeChecked + delayBetweenChecks) {
 
         // getUpdates returns 1 if there is a new message from Telegram
         int numNewMessages = bot.getUpdates(bot.last_message_received + 1);
-        Serial.println(numNewMessages);
 
         if (numNewMessages) {
             Serial.println("got response");
@@ -148,5 +183,5 @@ void loop() {
 
         lastTimeChecked = millis();
     }
-    delay(1000);
+    delay(100);
 }
